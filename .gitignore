@@ -6,6 +6,10 @@
 # dotenv files
 .env
 
+# Local development configuration (keep these files local only)
+dev-config.local.bat
+dev-config.local.sh
+
 # User-specific files
 *.rsuser
 *.suo
