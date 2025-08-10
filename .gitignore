@@ -482,3 +482,33 @@ $RECYCLE.BIN/
 
 # Vim temporary swap files
 *.swp
+
+# Custom: Sensitive configuration files that should NOT be committed
+appsettings.Local.json
+appsettings.*.Local.json
+appsettings.Production.json
+appsettings.Staging.json
+appsettings.Secret.json
+secrets.json
+*.secrets.json
+
+# Custom: Environment-specific files with sensitive data
+.env.local
+.env.production
+.env.staging
+*.env.local
+
+# Custom: Local development databases
+*.db
+*.sqlite
+*.sqlite3
+localdb/
+
+# Custom: Certificates and keys
+*.pfx
+*.p12
+*.key
+*.pem
+*.crt
+*.cer
+certificates/
