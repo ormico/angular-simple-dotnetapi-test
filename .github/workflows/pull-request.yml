@@ -1,0 +1,310 @@
+name: .NET API - Pull Request Validation
+
+on:
+  pull_request:
+    branches: [ main, 'release/*' ]
+  push:
+    branches: [ main ]
+
+env:
+  DOTNET_VERSION: '8.0.x'
+  BUILD_CONFIGURATION: Release
+  
+jobs:
+  code-quality:
+    name: 🔍 Code Quality & Security
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: 📥 Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+        
+    - name: 🟣 Setup .NET
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: ${{ env.DOTNET_VERSION }}
+        
+    - name: 📦 Restore dependencies
+      run: |
+        cd src/RecordManagement.Api
+        dotnet restore
+        
+    - name: 🔨 Build solution
+      run: |
+        cd src/RecordManagement.Api
+        dotnet build --no-restore --configuration ${{ env.BUILD_CONFIGURATION }}
+        
+    - name: 🧪 Run unit tests
+      run: |
+        cd src/RecordManagement.Api
+        dotnet test --no-build --configuration ${{ env.BUILD_CONFIGURATION }} --verbosity normal --collect:"XPlat Code Coverage" --results-directory ./TestResults
+        
+    - name: 📊 Upload test results
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: test-results
+        path: src/RecordManagement.Api/TestResults/
+        
+    - name: 🔍 Code Analysis
+      run: |
+        cd src/RecordManagement.Api
+        dotnet format --verify-no-changes --verbosity diagnostic
+        
+    - name: 🛡️ Security Analysis
+      run: |
+        cd src/RecordManagement.Api
+        # Install security analyzer
+        dotnet list package --vulnerable --include-transitive
+        dotnet list package --deprecated
+
+  integration-tests:
+    name: 🧪 Integration Tests
+    runs-on: ubuntu-latest
+    needs: code-quality
+    
+    services:
+      # Add test database if needed
+      sqlserver:
+        image: mcr.microsoft.com/mssql/server:2022-latest
+        env:
+          ACCEPT_EULA: Y
+          SA_PASSWORD: Test@1234
+        ports:
+          - 1433:1433
+        options: >-
+          --health-cmd "/opt/mssql-tools/bin/sqlcmd -S localhost -U sa -P Test@1234 -Q 'SELECT 1'"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    
+    steps:
+    - name: 📥 Checkout code
+      uses: actions/checkout@v4
+      
+    - name: 🟣 Setup .NET
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: ${{ env.DOTNET_VERSION }}
+        
+    - name: 📦 Restore dependencies
+      run: |
+        cd src/RecordManagement.Api
+        dotnet restore
+        
+    - name: 🔨 Build application
+      run: |
+        cd src/RecordManagement.Api
+        dotnet build --no-restore --configuration ${{ env.BUILD_CONFIGURATION }}
+        
+    - name: 🌐 Start API for integration tests
+      run: |
+        cd src/RecordManagement.Api
+        dotnet run --configuration ${{ env.BUILD_CONFIGURATION }} --no-build &
+        sleep 30  # Wait for API to start
+        
+    - name: 🔍 Health Check
+      run: |
+        # Test API endpoints
+        curl -f http://localhost:5094/health || exit 1
+        curl -f http://localhost:5094/api/records || exit 1
+        
+    - name: 🧪 API Integration Tests
+      run: |
+        # Test CRUD operations
+        echo "Testing POST /api/records"
+        RECORD_ID=$(curl -s -X POST http://localhost:5094/api/records \
+          -H "Content-Type: application/json" \
+          -d '{"name":"Test Record","description":"Integration test record"}' \
+          | grep -o '"id":"[^"]*"' | cut -d'"' -f4)
+        
+        echo "Created record with ID: $RECORD_ID"
+        
+        echo "Testing GET /api/records"
+        curl -f http://localhost:5094/api/records
+        
+        echo "Testing GET /api/records/$RECORD_ID"
+        curl -f http://localhost:5094/api/records/$RECORD_ID
+        
+        echo "Testing PUT /api/records/$RECORD_ID"
+        curl -f -X PUT http://localhost:5094/api/records/$RECORD_ID \
+          -H "Content-Type: application/json" \
+          -d '{"id":"'$RECORD_ID'","name":"Updated Record","description":"Updated description"}'
+        
+        echo "Testing DELETE /api/records/$RECORD_ID"
+        curl -f -X DELETE http://localhost:5094/api/records/$RECORD_ID
+        
+        echo "✅ All API endpoints working correctly"
+
+  docker-build:
+    name: 🐳 Docker Build & Security Scan
+    runs-on: ubuntu-latest
+    needs: code-quality
+    
+    steps:
+    - name: 📥 Checkout code
+      uses: actions/checkout@v4
+      
+    - name: 🐳 Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+      
+    - name: 🔨 Build Docker image
+      run: |
+        docker build -t recordmanagement-api:${{ github.sha }} .
+        
+    - name: 🛡️ Run Docker security scan
+      run: |
+        # Install trivy for security scanning
+        sudo apt-get update
+        sudo apt-get install wget apt-transport-https gnupg lsb-release
+        wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
+        echo "deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" | sudo tee -a /etc/apt/sources.list.d/trivy.list
+        sudo apt-get update
+        sudo apt-get install trivy
+        
+        # Scan the Docker image
+        trivy image --exit-code 1 --severity HIGH,CRITICAL recordmanagement-api:${{ github.sha }}
+        
+    - name: 📦 Save Docker image
+      run: |
+        docker save recordmanagement-api:${{ github.sha }} | gzip > recordmanagement-api.tar.gz
+        
+    - name: 📤 Upload Docker image artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: docker-image
+        path: recordmanagement-api.tar.gz
+        retention-days: 1
+
+  performance-test:
+    name: ⚡ Performance Testing
+    runs-on: ubuntu-latest
+    needs: integration-tests
+    
+    steps:
+    - name: 📥 Checkout code
+      uses: actions/checkout@v4
+      
+    - name: 🟣 Setup .NET
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: ${{ env.DOTNET_VERSION }}
+        
+    - name: 🔨 Build and start API
+      run: |
+        cd src/RecordManagement.Api
+        dotnet build --configuration Release
+        dotnet run --configuration Release --no-build &
+        sleep 30
+        
+    - name: ⚡ Load testing with curl
+      run: |
+        echo "🚀 Starting load test..."
+        
+        # Create test data
+        for i in {1..10}; do
+          curl -s -X POST http://localhost:5094/api/records \
+            -H "Content-Type: application/json" \
+            -d "{\"name\":\"Load Test Record $i\",\"description\":\"Performance test record $i\"}" > /dev/null
+        done
+        
+        # Performance test - measure response times
+        echo "📊 Measuring response times..."
+        
+        START_TIME=$(date +%s%N)
+        for i in {1..100}; do
+          curl -s http://localhost:5094/api/records > /dev/null
+        done
+        END_TIME=$(date +%s%N)
+        
+        TOTAL_TIME_MS=$(( (END_TIME - START_TIME) / 1000000 ))
+        AVG_TIME_MS=$(( TOTAL_TIME_MS / 100 ))
+        
+        echo "📈 Performance Results:"
+        echo "  Total time for 100 requests: ${TOTAL_TIME_MS}ms"
+        echo "  Average response time: ${AVG_TIME_MS}ms"
+        
+        # Set performance thresholds
+        if [ $AVG_TIME_MS -gt 1000 ]; then
+          echo "❌ Performance test failed: Average response time too high (${AVG_TIME_MS}ms > 1000ms)"
+          exit 1
+        else
+          echo "✅ Performance test passed: Average response time acceptable (${AVG_TIME_MS}ms)"
+        fi
+
+  api-documentation:
+    name: 📚 API Documentation
+    runs-on: ubuntu-latest
+    needs: code-quality
+    
+    steps:
+    - name: 📥 Checkout code
+      uses: actions/checkout@v4
+      
+    - name: 🟣 Setup .NET
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: ${{ env.DOTNET_VERSION }}
+        
+    - name: 🔨 Build application
+      run: |
+        cd src/RecordManagement.Api
+        dotnet build --configuration Release
+        
+    - name: 📚 Generate OpenAPI spec
+      run: |
+        cd src/RecordManagement.Api
+        # Start the application to generate OpenAPI spec
+        dotnet run --configuration Release --no-build &
+        sleep 30
+        
+        # Download OpenAPI specification
+        curl -o openapi.json http://localhost:5094/swagger/v1/swagger.json
+        
+        # Validate OpenAPI spec
+        if [ -s openapi.json ]; then
+          echo "✅ OpenAPI specification generated successfully"
+          echo "📄 API Endpoints:"
+          cat openapi.json | grep -o '"operationId":"[^"]*"' | sort | uniq
+        else
+          echo "❌ Failed to generate OpenAPI specification"
+          exit 1
+        fi
+        
+    - name: 📤 Upload OpenAPI spec
+      uses: actions/upload-artifact@v4
+      with:
+        name: openapi-spec
+        path: src/RecordManagement.Api/openapi.json
+
+  summary:
+    name: 📋 PR Summary
+    runs-on: ubuntu-latest
+    needs: [code-quality, integration-tests, docker-build, performance-test, api-documentation]
+    if: always()
+    
+    steps:
+    - name: 📊 Generate summary
+      run: |
+        echo "## 🎯 .NET API Pull Request Summary" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "| Check | Status |" >> $GITHUB_STEP_SUMMARY
+        echo "|-------|--------|" >> $GITHUB_STEP_SUMMARY
+        echo "| 🔍 Code Quality | ${{ needs.code-quality.result == 'success' && '✅ Passed' || '❌ Failed' }} |" >> $GITHUB_STEP_SUMMARY
+        echo "| 🧪 Integration Tests | ${{ needs.integration-tests.result == 'success' && '✅ Passed' || '❌ Failed' }} |" >> $GITHUB_STEP_SUMMARY
+        echo "| 🐳 Docker Build | ${{ needs.docker-build.result == 'success' && '✅ Passed' || '❌ Failed' }} |" >> $GITHUB_STEP_SUMMARY
+        echo "| ⚡ Performance | ${{ needs.performance-test.result == 'success' && '✅ Passed' || '❌ Failed' }} |" >> $GITHUB_STEP_SUMMARY
+        echo "| 📚 Documentation | ${{ needs.api-documentation.result == 'success' && '✅ Passed' || '❌ Failed' }} |" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+        if [[ "${{ needs.code-quality.result }}" == "success" && 
+              "${{ needs.integration-tests.result }}" == "success" && 
+              "${{ needs.docker-build.result }}" == "success" && 
+              "${{ needs.performance-test.result }}" == "success" && 
+              "${{ needs.api-documentation.result }}" == "success" ]]; then
+          echo "🎉 **All checks passed!** This PR is ready for review." >> $GITHUB_STEP_SUMMARY
+        else
+          echo "⚠️ **Some checks failed.** Please review the failing jobs above." >> $GITHUB_STEP_SUMMARY
+        fi
