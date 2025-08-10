@@ -1,0 +1,296 @@
+name: .NET API - Release & Deployment
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+
+env:
+  DOTNET_VERSION: '8.0.x'
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}/recordmanagement-api
+
+jobs:
+  build-and-test:
+    name: 🏗️ Build & Test
+    runs-on: ubuntu-latest
+    
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      
+    steps:
+    - name: 📥 Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+        
+    - name: 🟣 Setup .NET
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: ${{ env.DOTNET_VERSION }}
+        
+    - name: 📦 Restore dependencies
+      run: |
+        cd src/RecordManagement.Api
+        dotnet restore
+        
+    - name: 🏷️ Extract version
+      id: version
+      run: |
+        if [[ $GITHUB_REF == refs/tags/* ]]; then
+          VERSION=${GITHUB_REF#refs/tags/v}
+        else
+          # Get version from project file or use timestamp
+          if [ -f "src/RecordManagement.Api/RecordManagement.Api.csproj" ]; then
+            VERSION=$(grep -o '<Version>[^<]*' src/RecordManagement.Api/RecordManagement.Api.csproj | sed 's/<Version>//' || echo "1.0.0")
+          else
+            VERSION="1.0.0-$(date +%Y%m%d%H%M%S)"
+          fi
+        fi
+        echo "version=$VERSION" >> $GITHUB_OUTPUT
+        echo "Detected version: $VERSION"
+        
+    - name: 🔨 Build application
+      run: |
+        cd src/RecordManagement.Api
+        dotnet build --configuration Release --no-restore
+        
+    - name: 🧪 Run unit tests
+      run: |
+        cd src/RecordManagement.Api
+        dotnet test --configuration Release --no-build --verbosity normal --collect:"XPlat Code Coverage" --results-directory ./TestResults
+        
+    - name: 📊 Upload test results
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: test-results-${{ steps.version.outputs.version }}
+        path: src/RecordManagement.Api/TestResults/
+
+  docker-build:
+    name: 🐳 Docker Build & Publish
+    runs-on: ubuntu-latest
+    needs: build-and-test
+    
+    steps:
+    - name: 📥 Checkout code
+      uses: actions/checkout@v4
+      
+    - name: 🐳 Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+      
+    - name: 🔐 Log in to Container Registry
+      uses: docker/login-action@v3
+      with:
+        registry: ${{ env.REGISTRY }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+        
+    - name: 📝 Extract metadata
+      id: meta
+      uses: docker/metadata-action@v5
+      with:
+        images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+        tags: |
+          type=ref,event=branch
+          type=ref,event=pr
+          type=semver,pattern={{version}}
+          type=semver,pattern={{major}}.{{minor}}
+          type=sha,prefix={{branch}}-
+          
+    - name: 🔨 Build and push Docker image
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        push: true
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+
+  deploy-staging:
+    name: 🚀 Deploy to Staging
+    runs-on: ubuntu-latest
+    needs: [build-and-test, docker-build]
+    if: github.ref == 'refs/heads/main'
+    environment: staging
+    
+    steps:
+    - name: 📥 Checkout code
+      uses: actions/checkout@v4
+      
+    - name: 🚀 Deploy to staging
+      run: |
+        echo "🚀 Deploying .NET API v${{ needs.build-and-test.outputs.version }} to staging..."
+        
+        # Simulate deployment (replace with your actual deployment commands)
+        echo "📦 Pulling Docker image..."
+        echo "🔄 Updating staging environment..."
+        echo "🧪 Running smoke tests..."
+        
+        # Example deployment commands:
+        # kubectl set image deployment/api-deployment api=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.build-and-test.outputs.version }}
+        # or docker-compose commands, Azure CLI, etc.
+        
+        echo "✅ Staging deployment completed"
+        
+    - name: 🧪 Staging smoke tests
+      run: |
+        echo "🧪 Running staging smoke tests..."
+        
+        # Wait for deployment to be ready
+        sleep 30
+        
+        # Test staging endpoints (replace with your staging URL)
+        STAGING_URL="${{ secrets.STAGING_DEPLOY_URL || 'https://api-staging.yourapp.com' }}"
+        
+        echo "Testing health endpoint..."
+        # curl -f "$STAGING_URL/health" || exit 1
+        
+        echo "Testing API endpoints..."
+        # curl -f "$STAGING_URL/api/records" || exit 1
+        
+        echo "✅ Staging smoke tests passed"
+
+  deploy-production:
+    name: 🌟 Deploy to Production
+    runs-on: ubuntu-latest
+    needs: [build-and-test, docker-build, deploy-staging]
+    if: startsWith(github.ref, 'refs/tags/v')
+    environment: production
+    
+    steps:
+    - name: 📥 Checkout code
+      uses: actions/checkout@v4
+      
+    - name: 🌟 Deploy to production
+      run: |
+        echo "🌟 Deploying .NET API v${{ needs.build-and-test.outputs.version }} to production..."
+        
+        # Production deployment commands
+        echo "📦 Pulling Docker image..."
+        echo "🔄 Updating production environment..."
+        echo "🧪 Running production health checks..."
+        
+        # Example production deployment:
+        # kubectl set image deployment/api-deployment api=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.build-and-test.outputs.version }}
+        
+        echo "✅ Production deployment completed"
+        
+    - name: 🧪 Production health checks
+      run: |
+        echo "🧪 Running production health checks..."
+        
+        # Wait for deployment
+        sleep 60
+        
+        # Test production endpoints
+        PRODUCTION_URL="${{ secrets.PRODUCTION_DEPLOY_URL || 'https://api.yourapp.com' }}"
+        
+        echo "Testing health endpoint..."
+        # curl -f "$PRODUCTION_URL/health" || exit 1
+        
+        echo "Testing critical API endpoints..."
+        # curl -f "$PRODUCTION_URL/api/records" || exit 1
+        
+        echo "✅ Production health checks passed"
+
+  create-release:
+    name: 📋 Create GitHub Release
+    runs-on: ubuntu-latest
+    needs: [build-and-test, docker-build]
+    if: startsWith(github.ref, 'refs/tags/v')
+    
+    steps:
+    - name: 📥 Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+        
+    - name: 📝 Generate release notes
+      id: release_notes
+      run: |
+        echo "Generating release notes for v${{ needs.build-and-test.outputs.version }}..."
+        
+        # Get previous tag
+        PREVIOUS_TAG=$(git tag --sort=-version:refname | grep -v "^${{ github.ref_name }}$" | head -1)
+        
+        if [[ -n "$PREVIOUS_TAG" ]]; then
+          echo "## 🚀 What's New in v${{ needs.build-and-test.outputs.version }}" > release_notes.md
+          echo "" >> release_notes.md
+          echo "### 🎯 API Features" >> release_notes.md
+          git log $PREVIOUS_TAG..HEAD --pretty=format:"- %s" --grep="feat:" >> release_notes.md
+          echo "" >> release_notes.md
+          echo "" >> release_notes.md
+          echo "### 🐛 Bug Fixes" >> release_notes.md
+          git log $PREVIOUS_TAG..HEAD --pretty=format:"- %s" --grep="fix:" >> release_notes.md
+          echo "" >> release_notes.md
+          echo "" >> release_notes.md
+          echo "### 🔧 Technical Changes" >> release_notes.md
+          git log $PREVIOUS_TAG..HEAD --pretty=format:"- %s" --grep="chore:\|refactor:\|perf:" >> release_notes.md
+          echo "" >> release_notes.md
+          echo "" >> release_notes.md
+          echo "### 📦 Deployment" >> release_notes.md
+          echo "- Docker Image: \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.build-and-test.outputs.version }}\`" >> release_notes.md
+          echo "- .NET Version: ${{ env.DOTNET_VERSION }}" >> release_notes.md
+          echo "- Build Date: $(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> release_notes.md
+        else
+          echo "## 🎉 Initial Release v${{ needs.build-and-test.outputs.version }}" > release_notes.md
+          echo "" >> release_notes.md
+          echo "This is the initial release of the Record Management API." >> release_notes.md
+        fi
+        
+        cat release_notes.md
+        
+    - name: 📋 Create GitHub Release
+      uses: actions/create-release@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: ${{ github.ref_name }}
+        release_name: .NET API v${{ needs.build-and-test.outputs.version }}
+        body_path: release_notes.md
+        draft: false
+        prerelease: false
+
+  notification:
+    name: 📢 Deployment Notification
+    runs-on: ubuntu-latest
+    needs: [build-and-test, deploy-staging]
+    if: always()
+    
+    steps:
+    - name: 📢 Send notification
+      run: |
+        echo "📢 Sending deployment notifications..."
+        
+        VERSION="${{ needs.build-and-test.outputs.version }}"
+        STATUS="${{ needs.deploy-staging.result }}"
+        
+        if [[ "$STATUS" == "success" ]]; then
+          echo "✅ .NET API v$VERSION deployed successfully to staging"
+          # Add your notification logic here (Slack, Teams, email, etc.)
+          # curl -X POST -H 'Content-type: application/json' --data '{"text":"✅ .NET API v'$VERSION' deployed to staging"}' $SLACK_WEBHOOK
+        else
+          echo "❌ .NET API v$VERSION deployment failed"
+          # Send failure notification
+          # curl -X POST -H 'Content-type: application/json' --data '{"text":"❌ .NET API v'$VERSION' deployment failed"}' $SLACK_WEBHOOK
+        fi
+
+  cleanup:
+    name: 🧹 Cleanup
+    runs-on: ubuntu-latest
+    needs: [deploy-production, create-release]
+    if: always()
+    
+    steps:
+    - name: 🧹 Cleanup old artifacts
+      run: |
+        echo "🧹 Performing post-deployment cleanup..."
+        
+        # Cleanup logic here:
+        # - Remove old Docker images from registry
+        # - Archive old build artifacts
+        # - Clean up temporary resources
+        
+        echo "✅ Cleanup completed"

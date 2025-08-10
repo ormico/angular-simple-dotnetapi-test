@@ -1,0 +1,292 @@
+name: Branch Management & Validation
+
+on:
+  push:
+    branches: [ main, 'release/*', 'hotfix/*' ]
+  pull_request:
+    branches: [ main, 'release/*' ]
+
+jobs:
+  branch-validation:
+    name: 🌳 Branch Validation
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: 📥 Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+        
+    - name: 🔍 Validate branch naming
+      run: |
+        BRANCH_NAME=${GITHUB_HEAD_REF:-${GITHUB_REF#refs/heads/}}
+        echo "Current branch: $BRANCH_NAME"
+        
+        # Validate simplified branch naming conventions
+        if [[ "$BRANCH_NAME" == "main" ]]; then
+          echo "✅ Main branch: $BRANCH_NAME"
+        elif [[ "$BRANCH_NAME" =~ ^feature/.+ ]]; then
+          echo "✅ Feature branch: $BRANCH_NAME"
+        elif [[ "$BRANCH_NAME" =~ ^release/.+ ]]; then
+          echo "✅ Release branch: $BRANCH_NAME"
+        elif [[ "$BRANCH_NAME" =~ ^hotfix/.+ ]]; then
+          echo "✅ Hotfix branch: $BRANCH_NAME"
+        else
+          echo "❌ Invalid branch name: $BRANCH_NAME"
+          echo "Branch naming should follow these patterns:"
+          echo "  - feature/feature-name (branch from main)"
+          echo "  - release/version-number (branch from main)"
+          echo "  - hotfix/fix-description (branch from release/*)"
+          echo "  - main (production)"
+          exit 1
+        fi
+
+  main-integration:
+    name: 🔄 Main Branch Integration
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    
+    steps:
+    - name: 📥 Checkout code
+      uses: actions/checkout@v4
+      
+    - name: 🟣 Setup .NET
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: '8.0.x'
+        
+    - name: 📦 Restore dependencies
+      run: |
+        cd src/RecordManagement.Api
+        dotnet restore
+        
+    - name: 🧪 Run integration tests
+      run: |
+        cd src/RecordManagement.Api
+        dotnet test --configuration Release
+        dotnet build --configuration Release
+        
+    - name: 🏷️ Update version for main
+      run: |
+        cd src/RecordManagement.Api
+        # Main branch gets official releases only
+        echo "Main branch contains production-ready code"
+        
+    - name: 📦 Build production artifacts
+      run: |
+        cd src/RecordManagement.Api
+        dotnet build --configuration Release
+        echo "🎉 Production build completed"
+
+  release-preparation:
+    name: 🚀 Release Branch Preparation
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/heads/release/')
+    
+    steps:
+    - name: 📥 Checkout code
+      uses: actions/checkout@v4
+      
+    - name: 🟣 Setup .NET
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: '8.0.x'
+        
+    - name: 📦 Restore dependencies
+      run: |
+        cd src/RecordManagement.Api
+        dotnet restore
+        
+    - name: 🧪 Run release tests
+      run: |
+        cd src/RecordManagement.Api
+        dotnet test --configuration Release
+        dotnet build --configuration Release
+        
+    - name: 📋 Extract release version
+      id: version
+      run: |
+        BRANCH_NAME=${GITHUB_REF#refs/heads/release/}
+        echo "Release branch: $BRANCH_NAME"
+        echo "version=$BRANCH_NAME" >> $GITHUB_OUTPUT
+        
+    - name: 🏷️ Update version for release
+      run: |
+        cd src/RecordManagement.Api
+        RELEASE_VERSION="${{ steps.version.outputs.version }}"
+        echo "Setting version to: $RELEASE_VERSION"
+        
+        # Update project file version
+        sed -i "s/<Version>.*<\/Version>/<Version>$RELEASE_VERSION<\/Version>/" RecordManagement.Api.csproj
+        
+    - name: 📝 Generate release notes
+      run: |
+        echo "# Release Notes for v${{ steps.version.outputs.version }}" > RELEASE_NOTES.md
+        echo "" >> RELEASE_NOTES.md
+        echo "## API Changes" >> RELEASE_NOTES.md
+        
+        # Get commits since last release
+        LAST_TAG=$(git tag --sort=-version:refname | head -1)
+        if [[ -n "$LAST_TAG" ]]; then
+          git log $LAST_TAG..HEAD --pretty=format:"- %s" --grep="feat:" >> RELEASE_NOTES.md
+        fi
+        
+        echo "" >> RELEASE_NOTES.md
+        echo "## Bug Fixes" >> RELEASE_NOTES.md
+        
+        if [[ -n "$LAST_TAG" ]]; then
+          git log $LAST_TAG..HEAD --pretty=format:"- %s" --grep="fix:" >> RELEASE_NOTES.md
+        fi
+        
+        cat RELEASE_NOTES.md
+        
+    - name: 🎯 Validate release readiness
+      run: |
+        cd src/RecordManagement.Api
+        echo "🔍 Validating release readiness..."
+        
+        # Check build succeeds
+        dotnet build --configuration Release
+        echo "✅ Production build successful"
+        
+        # Run all tests
+        dotnet test --configuration Release --verbosity normal
+        echo "✅ All tests passing"
+        
+        echo "🎉 Release branch is ready for merge to main"
+
+  hotfix-validation:
+    name: 🚨 Hotfix Validation
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/heads/hotfix/')
+    
+    steps:
+    - name: 📥 Checkout code
+      uses: actions/checkout@v4
+      
+    - name: 🟣 Setup .NET
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: '8.0.x'
+        
+    - name: 📦 Restore dependencies
+      run: |
+        cd src/RecordManagement.Api
+        dotnet restore
+        
+    - name: 🧪 Run hotfix tests
+      run: |
+        cd src/RecordManagement.Api
+        dotnet test --configuration Release
+        dotnet build --configuration Release
+        
+    - name: 📋 Extract hotfix details
+      id: hotfix
+      run: |
+        BRANCH_NAME=${GITHUB_REF#refs/heads/hotfix/}
+        echo "Hotfix branch: $BRANCH_NAME"
+        echo "name=$BRANCH_NAME" >> $GITHUB_OUTPUT
+        
+        # Generate hotfix version (patch increment)
+        CURRENT_VERSION="1.0.0"  # Default if no version found
+        if [ -f "src/RecordManagement.Api/RecordManagement.Api.csproj" ]; then
+          CURRENT_VERSION=$(grep -o '<Version>[^<]*' src/RecordManagement.Api/RecordManagement.Api.csproj | sed 's/<Version>//' || echo "1.0.0")
+        fi
+        
+        IFS='.' read -ra VERSION_PARTS <<< "$CURRENT_VERSION"
+        MAJOR=${VERSION_PARTS[0]}
+        MINOR=${VERSION_PARTS[1]}
+        PATCH=${VERSION_PARTS[2]%%[-+]*}
+        
+        NEW_PATCH=$((PATCH + 1))
+        HOTFIX_VERSION="$MAJOR.$MINOR.$NEW_PATCH"
+        
+        echo "Hotfix version: $HOTFIX_VERSION"
+        echo "version=$HOTFIX_VERSION" >> $GITHUB_OUTPUT
+        
+    - name: 🏷️ Update version for hotfix
+      run: |
+        cd src/RecordManagement.Api
+        HOTFIX_VERSION="${{ steps.hotfix.outputs.version }}"
+        echo "Setting hotfix version to: $HOTFIX_VERSION"
+        
+        # Update project file version
+        sed -i "s/<Version>.*<\/Version>/<Version>$HOTFIX_VERSION<\/Version>/" RecordManagement.Api.csproj
+        
+    - name: 🚨 Validate hotfix
+      run: |
+        cd src/RecordManagement.Api
+        echo "🚨 Validating hotfix: ${{ steps.hotfix.outputs.name }}"
+        echo "🏷️ New version: ${{ steps.hotfix.outputs.version }}"
+        
+        # Ensure critical tests pass
+        dotnet test --configuration Release --verbosity normal
+        dotnet build --configuration Release
+        
+        echo "✅ Hotfix validation completed"
+        echo "🎯 Ready for emergency deployment"
+
+  auto-merge-preparation:
+    name: 🔄 Auto-merge Preparation
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' && (contains(github.head_ref, 'release/') || contains(github.head_ref, 'hotfix/'))
+    
+    steps:
+    - name: 📝 Add merge instructions
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const { owner, repo, number } = context.issue;
+          
+          let message = "";
+          if (context.payload.pull_request.head.ref.startsWith('release/')) {
+            message = `## 🚀 .NET API Release Merge Instructions
+            
+            This is a **release branch** merge to main. After merging:
+            1. 🏷️ A git tag will be automatically created
+            2. 📦 Release artifacts will be built and published
+            3. 🚀 Automatic deployment to staging/production
+            4. 📋 GitHub release will be created with notes
+            5. 🐳 Docker images will be published to registry
+            
+            **Checklist before merge:**
+            - [ ] All tests are passing
+            - [ ] Version number is correct in .csproj
+            - [ ] Release notes are prepared
+            - [ ] API documentation is updated
+            - [ ] Database migrations are ready (if any)
+            - [ ] Stakeholders have approved
+            `;
+          } else if (context.payload.pull_request.head.ref.startsWith('hotfix/')) {
+            message = `## 🚨 .NET API Hotfix Merge Instructions
+            
+            This is a **hotfix branch** merge. Source: ${context.payload.pull_request.base.ref}
+            
+            **If merging to main:**
+            - 🏷️ A git tag will be automatically created
+            - 📦 Hotfix artifacts will be built and published
+            - 🚨 Immediate deployment to production
+            - 🐳 Docker images will be published
+            
+            **If merging to release branch:**
+            - 🔧 Hotfix will be included in the next release
+            - 🧪 Additional testing recommended
+            
+            **Emergency checklist:**
+            - [ ] Critical issue is resolved
+            - [ ] Minimal changes only
+            - [ ] Tests are passing
+            - [ ] API endpoints still work
+            - [ ] Database changes are backward compatible
+            - [ ] Ready for deployment
+            `;
+          }
+          
+          if (message) {
+            await github.rest.issues.createComment({
+              owner,
+              repo,
+              issue_number: number,
+              body: message
+            });
+          }
